@@ -15,6 +15,10 @@ Two tools for taming prose style, built on the same dataset and scorer:
 Both run on `DEPURPLE_AXIS` (`purple`, `euphemism`, or jointly). Switching the axis shifts
 all paths and artifact names automatically; the pipeline is identical for each.
 
+Disclaimer: The dataset so far is mostly gathered from _RP_ logs where slop is more prominent, 
+so zero-shot short story writing will likely slip past the classifier. Because short stories take the shape 
+of human writing (mostly from /r/WritingPrompts) and I tip-toe around human writing.
+
 ## Quick start
 
 **Install dependencies**
