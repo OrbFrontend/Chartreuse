@@ -1,0 +1,4 @@
+# Serving deps. torch + numpy come from the CUDA base image (see Dockerfile).
+fastapi
+uvicorn[standard]
+transformers>=4.48

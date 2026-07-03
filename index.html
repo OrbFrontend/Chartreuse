@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Purple Prose Detector</title>
+<style>
+  :root { --purple: #7c3aed; --purple-bg: #efe7fd; --ink: #1b1b1f; --muted: #6b6b76; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.6 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+         color: var(--ink); background: #faf9fc; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 24px; }
+  textarea { width: 100%; min-height: 200px; padding: 14px; border: 1px solid #d8d6e0;
+             border-radius: 10px; font: inherit; resize: vertical; background: #fff; }
+  textarea:focus { outline: 2px solid var(--purple); border-color: transparent; }
+  .row { display: flex; gap: 12px; align-items: center; margin-top: 12px; }
+  button { background: var(--purple); color: #fff; border: 0; border-radius: 10px;
+           padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: default; }
+  .summary { color: var(--muted); }
+  .summary b { color: var(--ink); }
+  #out { margin-top: 28px; }
+  .result { background: #fff; border: 1px solid #e7e5ef; border-radius: 12px;
+            padding: 20px 22px; font-size: 1.05rem; line-height: 1.9; }
+  mark { background: var(--purple-bg); color: var(--purple); border-radius: 4px;
+         padding: 1px 3px; cursor: help; }
+  mark sup { font-size: .65em; font-weight: 700; opacity: .8; margin-left: 2px; }
+  .legend { display: inline-flex; align-items: center; gap: 6px; color: var(--muted);
+            font-size: .9rem; margin-left: auto; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; background: var(--purple-bg);
+            border: 1px solid var(--purple); display: inline-block; }
+  .err { color: #b00020; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Purple Prose Detector</h1>
+  <p class="sub">Paste a passage. Each sentence is scored; the flowery ones get highlighted.</p>
+
+  <textarea id="text" placeholder="Paste your text here…"></textarea>
+  <div class="row">
+    <button id="go">Detect purple prose</button>
+    <span class="legend"><span class="swatch"></span> purple sentence</span>
+  </div>
+
+  <div id="out"></div>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const btn = $("#go"), out = $("#out");
+
+async function detect() {
+  const text = $("#text").value;
+  if (!text.trim()) { out.innerHTML = ""; return; }
+  btn.disabled = true; btn.textContent = "Scoring…"; out.innerHTML = "";
+  try {
+    const r = await fetch("/api/detect", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    render(await r.json());
+  } catch (e) {
+    out.innerHTML = `<p class="err">Something went wrong: ${e.message}</p>`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Detect purple prose";
+  }
+}
+
+function esc(s) {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function render(data) {
+  const { sentences, purple_count } = data;
+  if (!sentences.length) { out.innerHTML = `<p class="summary">No sentences found.</p>`; return; }
+  const body = sentences.map((s) => {
+    const t = esc(s.text);
+    if (!s.purple) return t;
+    const pct = Math.round(s.prob * 100);
+    return `<mark title="P(purple) = ${pct}%">${t}<sup>${pct}</sup></mark>`;
+  }).join(" ");
+  out.innerHTML =
+    `<p class="summary"><b>${purple_count}</b> of <b>${sentences.length}</b> ` +
+    `sentence${sentences.length === 1 ? "" : "s"} flagged as purple.</p>` +
+    `<div class="result">${body}</div>`;
+}
+
+btn.addEventListener("click", detect);
+$("#text").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") detect();
+});
+</script>
+</body>
+</html>

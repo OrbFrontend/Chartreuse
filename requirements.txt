@@ -1,0 +1,17 @@
+# Ettin encoders require transformers >= 4.48
+transformers>=4.48
+datasets>=2.19
+accelerate>=0.30
+scikit-learn>=1.4            # logistic-regression baseline (§0) + P/R/F1 metrics
+numpy
+pandas
+syntok>=1.4                 # sentence segmentation for mining (3b) and upstream gating
+# CPU build of torch — installed separately (see plan Phase 2): pip install torch --index-url https://download.pytorch.org/whl/cpu
+# GPU ablation box wants the CUDA wheel matching the card (Blackwell/RTX 6000 PRO = cu128): pip install torch --index-url https://download.pytorch.org/whl/cu128
+optuna>=4.0                  # TPE search in depurple/optimize.py (GPU box only)
+optimum[onnxruntime]>=1.20   # ONNX export + dynamic INT8 quantization
+onnxruntime>=1.18
+# Dataset generation (3a/3b/3d) calls a strong LLM via an OpenAI-COMPATIBLE endpoint, so the same
+# client works for OpenAI, OpenRouter, vLLM, or a local llama.cpp server. We use a local llama.cpp
+# gemma server (see docs/HANDOVER-3b.md + memory). The client is decoupled from the training env.
+openai>=1.40
