@@ -25,7 +25,7 @@ shape of human writing (from /r/WritingPrompts and the like), and I tip-toe arou
 
 ## Quick start
 
-**Install dependencies**
+**Install dependencies (we'll always be in venv from here on)**
 ```
 python -m venv .venv && . .venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/cu130
@@ -51,6 +51,8 @@ PORT=9000 ./scripts/host_classifier_app.sh
 
 If you don't want to read the above guide, these commands work out of the box:
 ```
+pip install --upgrade "transformers==5.12.1"
+
 export DEPURPLE_MODEL=google/gemma-4-31B-it    # Model will be automatically downloaded to HF_HOME
 export ETTIN_MODEL=jhu-clsp/ettin-encoder-400m # Model will be automatically downloaded to HF_HOME
 
