@@ -19,26 +19,14 @@ Ubuntu 24+
 
 160 GiB disk space required for training + ablating + quantization.
 
-31B bf16 peaks at 85GB VRAM at ROLLOUT_BATCH=10.
+31B bf16 peaks at 85GB VRAM at ROLLOUT_BATCH=15.
 
 Currently the code supports single GPU only and does NOT shard!
 
 ---
 
-## Phase 0 — disk + HF token on the remote
-Verify you have enoguh disk space:
-```
-echo $HF_HOME                             # vast preset: /workspace/.hf_home — leave it, don't override
-df -h /workspace                          # need ~160 GB free (62 base + 62 output + cache)
-ls $HF_HOME/hub                           # base may already be cached (models--google--gemma-4-31B-it)
-hf auth login                             # or export HF_TOKEN=hf_xxx — if the model is gated,
-                                          # accept the license on the model page first
-```
-
 ## Phase 1 — copy the repo up (from your local box)
-Set the connection vars once (reused in Phase 8's pull-back). This node uses a
-**non-default ssh port**, so every rsync below passes `-e "ssh -p $GPU_PORT"` — without it
-rsync silently hits port 22 and hangs:
+Set the connection vars once (reused in Phase 8's pull-back):
 ```
 export GPU_USER=root                      # rental's ssh user
 export GPU_HOST=121.158.120.134           # rental's host/IP
@@ -59,6 +47,15 @@ From this point on, we'll work from inside the remote GPU node. SSH into it with
 ssh -p $GPU_PORT $GPU_USER@$GPU_HOST -L 8080:localhost:8080
 ```
 
+**Verify you have enoguh disk space:**
+```
+echo $HF_HOME                             # vast preset: /workspace/.hf_home — leave it, don't override
+df -h /workspace                          # need ~160 GB free (62 base + 62 output + cache)
+ls $HF_HOME/hub                           # base may already be cached (models--google--gemma-4-31B-it)
+hf auth login                             # or export HF_TOKEN=hf_xxx — if the model is gated,
+                                          # accept the license on the model page first
+```
+
 RTX 6000 PRO is **Blackwell (sm_120)**
 ```
 cd ~/Chartreuse
@@ -73,7 +70,7 @@ python -c "import torch;print(torch.__version__, torch.cuda.get_device_capabilit
 Export required env vars:
 ```
 export DEPURPLE_MODEL=google/gemma-4-31B-it
-export ETTIN_MODEL=jhu-clsp/ettin-encoder-400m
+export ETTIN_MODEL=jhu-clsp/ettin-encoder-150m
 ```
 
 ## Phase 3 — pull the base model from HF (background it)
@@ -106,7 +103,7 @@ export DEPURPLE_AXIS=purple,euphemism
 Now the actual ablation, this will take some time:
 
 ```
-ROLLOUT_BATCH=10 scripts/depurple.sh --trials 180 # resumable: re-run to replay the log + finish the remainder; --fresh restarts at 0
+ROLLOUT_BATCH=15 scripts/depurple.sh --trials 180 # resumable: re-run to replay the log + finish the remainder; --fresh restarts at 0
 ```
 - Directions are keyed to `(model, axis)` and built ON the box — scripts/depurple.sh extracts fresh →
   `directions-gemma-4-31b-it.pt` (purple) + `directions-gemma-4-31b-it-euphemism.pt`.
@@ -121,8 +118,8 @@ ROLLOUT_BATCH=10 scripts/depurple.sh --trials 180 # resumable: re-run to replay 
 ## Phase 5.5 — benchmarking (before you eyeball)
 Catch a lobotomy with some benchmarks:
 ```
-ROLLOUT_BATCH=10 scripts/eval_bench.sh --fewshot 5 babi 500              # best trial vs base, 500 questions
-ROLLOUT_BATCH=10 scripts/eval_bench.sh ifeval 50
+ROLLOUT_BATCH=15 scripts/eval_bench.sh --fewshot 5 babi 500              # best trial vs base, 500 questions
+ROLLOUT_BATCH=15 scripts/eval_bench.sh ifeval 50
 ```
 Bench the trial you'll actually serve: default `--variant best`; pass `--variant trialN` to floor
 a specific chosen trial instead (same names/strength as serve.py, so bench == serve). A big
@@ -142,7 +139,7 @@ If it collapsed (staccato / empty / repetition) OR either axis didn't actually m
 near-best trials by retained accuracy and pick a non-lobotomized one, not just the
 cheapest scalar:
 ```
-ROLLOUT_BATCH=10 scripts/bench_floor.sh   # babi 1000; scripts/eval_bench.sh for one base-vs-variant task
+ROLLOUT_BATCH=15 scripts/bench_floor.sh   # babi 1000; scripts/eval_bench.sh for one base-vs-variant task
 ```
 
 ### Optional — remote OpenAI endpoint to hand-test on top of the eyeball
