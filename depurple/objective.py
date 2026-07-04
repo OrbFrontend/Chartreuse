@@ -372,7 +372,7 @@ def _kill_test(model, tok, axis: str) -> None:
     """Run one axis's baseline signal check on the unedited model.
 
     Euphemism checks that there is a gap to close. Purple checks that P(purple)
-    rises over turns. Reads this axis's classifier and scenarios so joint runs
+    is present at baseline (enough to reduce, at any depth). Reads this axis's classifier and scenarios so joint runs
     check every axis, not just the primary one."""
     if axis == "euphemism":
         gate_zero(model, tok, axis=axis)
@@ -388,8 +388,11 @@ def _kill_test(model, tok, axis: str) -> None:
     early = sum(curve[:2]) / 2
     late = sum(curve[-2:]) / 2
     print(f"early(1-2)={early:.3f}  late(-2)={late:.3f}  rise={late - early:+.3f}")
-    assert late > early, f"{axis} does NOT rise with depth — multi-turn eval has no signal"
-    print(f"KILL-TEST 2 PASSED: {axis} emerges over turns")
+    # We want purple gone at every depth, not just where it peaks — gate on there
+    # being enough purple to reduce, not on it rising over turns.
+    lw = late_weighted(curve)
+    assert lw > 0.2, f"{axis} baseline too low ({lw:.3f}) — nothing to reduce, eval has no signal"
+    print(f"KILL-TEST 2 PASSED: {axis} present at baseline (late-weighted {lw:.3f})")
 
 
 def main() -> None:
