@@ -6,11 +6,11 @@
 
 AI slop gets boring and vomit-inducing after a while. It's pervasive, meaningless, and ruins the reading experience. The most notorious manifestations are purple prose and euphemisms.
 
-Purple prose and euphemisms are not pretrained behaviors. They are intentional post-training artifacts, and they can be safely removed.
+Purple prose and euphemisms are not pretrained behaviors. They are intentional post-training artifacts, and they can be somewhat safely removed.
 
 ### How?
 
-A transformer-based LLM reads text as a vector (a list of numbers) for each word. This vector travels down the dozens of layers that it has. Every layer reads and writes to the same "scratchpad" called a "residual stream", it reads what's there, thinks, then adds its contribution back, and nothing is erased in this process. Gemma4-E4B-it has 42 layers, the scratchpad is a list of 2560 numbers wide.
+A transformer-based LLM reads text as a vector (a list of numbers) for each word. This vector travels down the dozens of layers that it has. Every layer reads and writes to the same "scratchpad" called a "residual stream", it reads what's there, thinks, then adds its contribution back, and nothing is erased in this process. For example, Gemma4-E4B-it has 42 layers, the scratchpad is a list of 2560 numbers wide.
 
 In our case, every layer in the RL'd model pushes its representation towards purple-ness, accumulating layer by layer. The final result is a very purple list of numbers. This shift is geometrically consistent, they're pushed in the same direction. Our target is to find this direction and remove it from the weights.
 
