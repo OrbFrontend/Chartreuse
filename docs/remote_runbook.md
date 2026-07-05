@@ -182,6 +182,58 @@ rsync -az -e "ssh -p $GPU_PORT" $GPU_USER@$GPU_HOST:~/Chartreuse/depurple/direct
 Serving is in-memory (no disk copy): `python -m depurple.serve --variant best --strength 0.8`
 — but `serve.py` also loads on one GPU, so a 31B serve needs a 96 GB card or a quantized variant.
 
+## Phase 9 — quantize the depurpled model to GGUF (separate box, after the fact)
+This phase was run standalone against an already-depurpled checkpoint
+(`gemma-4-31b-it-purple-euphemism-trial116-s1.5-depurpled`) on a fresh rented box —
+not chained onto Phase 7 in the same session. What actually happened, in order:
+
+```
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
+source /venv/main/bin/activate
+pip install -r llama.cpp/requirements.txt      # pulls transformers 4.57.6 — too old, see below
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON   # CPU-only build; quantizing doesn't need CUDA
+cmake --build build -j$(nproc) --target llama-quantize
+```
+
+**`Gemma4ForConditionalGeneration` needs `transformers>=5.x`.** The repo's
+`requirements.txt` pins `transformers==4.57.6`, which doesn't know the `gemma4`
+model type — `convert_hf_to_gguf.py` falls back to reading `config.json` directly
+(fine) but then dies loading the tokenizer (`AttributeError: 'list' object has no
+attribute 'keys'` in `_set_model_specific_special_tokens`). Fix: `pip install
+transformers==5.12.1` (same version the model's `config.json` declares) before
+converting. llama.cpp's `conversion/gemma.py` already registers
+`Gemma4ForConditionalGeneration` / `Gemma4VisionAudioModel` upstream — no patch
+needed, just the newer transformers.
+
+**Disk math forced a specific order** (160 GB box, model dir ~59 GB, bf16 gguf
+~61 GB, Q8_0 ~33 GB, Q4_K_M ~19 GB — bf16 + Q8_0 + original don't fit
+simultaneously):
+1. `convert_hf_to_gguf.py --outtype q8_0` straight from safetensors (skips a bf16
+   intermediate) — but its output **can't be used as a quantize source**:
+   `llama-quantize` refuses with `requantizing from type q8_0 is disabled`. Threw
+   this file away.
+2. `convert_hf_to_gguf.py --outtype bf16` instead (the real intermediate).
+3. `llama-quantize <bf16> <out> Q4_K_M $(nproc)` — **OOM-killed** partway through
+   (cgroup `memory.max` ~125 GiB; page cache from the bf16 read + safetensors still
+   cached pushed it over, `/proc/sys/vm/drop_caches` is blocked in the container so
+   caches can't be dropped by hand). Fix: rerun with a small thread count
+   (`... Q4_K_M 8`, not `$(nproc)`=24) — succeeded in ~2.5 min. Fewer threads =
+   less simultaneous dirty-page/writeback pressure.
+4. Uploaded the original safetensors checkpoint to
+   `chartreuse-verte/gemma-4-31b-it-purple-euphemism-trial116-s1.5-depurpled` (HF,
+   public), then `rm -rf` it locally — needed the ~59 GB back and had no further
+   use for it once the bf16 gguf existed.
+5. `llama-quantize <bf16> <out> Q8_0 8` — same 8-thread fix applied up front, no
+   OOM.
+6. Uploaded `-Q4_K_M.gguf` and `-Q8_0.gguf` to
+   `chartreuse-verte/gemma-4-31b-it-purple-euphemism-trial116-s1.5-depurpled-GGUF`
+   (public) via `hf upload <repo> <local-file> <path-in-repo>`, one at a time
+   (chained with `&&`, backgrounded with `nohup`).
+
+Net takeaway for next time: don't bother with the direct-to-Q8_0 shortcut, it's a
+dead end for producing K-quants — go straight to bf16, and always cap
+`llama-quantize`'s thread count well under `nproc` on memory-constrained boxes.
+
 ## Gotchas recap
 - Joint needs **both scorers + both pairs + both directions** — train both scorers ON the remote (Phase 4), both pairs ride the repo rsync, scripts/depurple.sh builds both directions on the remote.
 - torch **cu130** (sm_120, matches the node's CUDA 13.0 / Blackwell), not cu124 — wrong wheel = no Blackwell kernels.
