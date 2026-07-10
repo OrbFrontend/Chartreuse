@@ -11,6 +11,7 @@ linear in the sampled residual stream.
 
     python -m depurple.direction            # extract + self-check, saves the direction artifact
     python -m depurple.direction --diagnose # length/register confound report, no edit
+    python -m depurple.direction --layers   # per-layer write attribution (where does the axis live?)
 
 DEPURPLE_PROJECT controls optional projection before saving the active direction.
 The raw direction and projection axis are saved alongside it so diagnostics remain
@@ -66,7 +67,13 @@ def pooled(model, tok, texts: list[str]) -> torch.Tensor:
 
 
 def _load():
-    tok = AutoTokenizer.from_pretrained(MODEL)
+    try:
+        tok = AutoTokenizer.from_pretrained(MODEL)
+    except AttributeError:
+        # ponytail: transformers 4.57 chokes on the list-form extra_special_tokens in the
+        # refreshed gemma-4 tokenizer_config; passing the dict form overrides it. Drop
+        # this fallback when the venv's transformers is upgraded.
+        tok = AutoTokenizer.from_pretrained(MODEL, extra_special_tokens={"video_token": "<|video|>"})
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16).to(DEVICE).eval()
     return tok, model
 
@@ -134,6 +141,48 @@ def diagnose() -> None:
     print(f"  GATE #3 survive<0.5 => under-ablate:  {'YES (re-tune kernel)' if survive[mid].min() < 0.5 else 'no'}")
 
 
+def layers() -> None:
+    """Per-layer write attribution: how much each decoder layer WRITES along d̂, pos minus neg.
+    pooled() is linear in the hidden states, so pooled[:, l+1] - pooled[:, l] is the pooled
+    residual write of layer l — exactly the component ablation removes. The profile over depth
+    is the empirical kernel shape (vs the assumed mid-stack bump). Reads the saved direction
+    artifact; falls back to computing d from all pairs if absent."""
+    tok, model = _load()
+    pairs = load_pairs()
+    plain = pooled(model, tok, [p[0] for p in pairs])              # [N, L+1, d]
+    purple = pooled(model, tok, [p[1] for p in pairs])
+    try:
+        art = torch.load(OUT, weights_only=False)
+        assert art.get("model") == MODEL and art.get("axis", "purple") == AXIS
+        direction, best = art["direction"], int(art["best_layer"])
+        src = f"{OUT} (project={art.get('project')!r})"
+    except (FileNotFoundError, AssertionError):
+        direction = _unit(purple.mean(0) - plain.mean(0))
+        best = int(((purple * direction).sum(-1) > (plain * direction).sum(-1)).float().mean(0).argmax())
+        src = "computed in-place (no artifact)"
+
+    w_pos, w_neg = purple.diff(dim=1), plain.diff(dim=1)           # [N, L, d] write of layer l
+    per = ((w_pos - w_neg) * direction[1:]).sum(-1).mean(0)        # [L] onto d̂[l+1] (per_layer=True)
+    fixed = ((w_pos - w_neg) * direction[best]).sum(-1).mean(0)    # [L] onto d̂[best] (dir_layer)
+    scale = w_pos.norm(dim=-1).mean(0)                             # [L] mean write norm: residual
+    frac = per / scale.clamp(min=1e-8)                             # growth-corrected share of the write
+
+    mass = per.clamp(min=0)                                        # headline = per-layer basis (matches
+    cum = mass.cumsum(0) / mass.sum().clamp(min=1e-8)              # the per_layer=True default kernel)
+    q = {p: int((cum >= p).nonzero()[0]) for p in (0.25, 0.50, 0.75)}
+    L = len(per)
+    print(f"\n=== write attribution: axis={AXIS}  {len(pairs)} pairs  {L} layers  d from {src} ===")
+    print("  layer   per-layer d̂   /write-norm    fixed d̂[best]   cum%")
+    top = mass.max().clamp(min=1e-8)
+    for l in range(L):
+        bar = "#" * int(20 * mass[l] / top)
+        print(f"  {l:3d}     {per[l]:+8.3f}     {frac[l]:+8.3f}       {fixed[l]:+8.3f}   {100 * cum[l]:5.1f}  {bar}")
+    print(f"\n  best_layer={best} (early best = lexically separable, not where style is written)")
+    print(f"  peak write layer={int(mass.argmax())} (max_pos~{int(mass.argmax()) / (L - 1):.2f})  "
+          f"cum-mass 25/50/75% at layers {q[0.25]}/{q[0.50]}/{q[0.75]} "
+          f"(max_pos~{q[0.50] / (L - 1):.2f})")
+
+
 def main() -> None:
     tok, model = _load()
 
@@ -183,5 +232,7 @@ def main() -> None:
 if __name__ == "__main__":
     if "--diagnose" in sys.argv:
         diagnose()
+    elif "--layers" in sys.argv:
+        layers()
     else:
         main()
