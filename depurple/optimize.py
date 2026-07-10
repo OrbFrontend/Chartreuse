@@ -33,7 +33,7 @@ from optuna.trial import TrialState, create_trial
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from depurple._model import (LOG, OUT_DIR, AXIS, AXES, MULTI, NORM_PRESERVE, norm_preserve_for,
-                             axis_weights, classifier_dir, load_directions)
+                             axis_weights, classifier_dir, directions_path, load_directions)
 from depurple.ablate import (AblationSpec, apply_ablation, build_kernel, decoder_layers,
                             restore, snapshot)
 from depurple.objective import (BETA, GEN_MODEL, RolloutAborted, evaluate, euph_scores,
@@ -215,17 +215,56 @@ def _log_trial(trial: optuna.Trial, primary: float, comps: dict[str, float],
 
 
 def _layer_window(n_layers: int, axis: str = AXIS) -> tuple[int, int]:
-    """dir_layer search bounds for one axis. Purple: mid-stack (15-85%) — style lives there
-    and the early surface-lexical layers let the optimizer Goodhart the metric. Euphemism: do
-    not assume mid-stack; widen to near-full depth and let the search find where the
-    euphemistic register lives."""
+    """dir_layer search bounds for one axis. The LOW bound guards against Goodharting: the
+    early surface-lexical layers separate the classes trivially (direction.py --layers shows
+    acc saturating by layer ~4), so directions from there cut vocabulary, not style. The HIGH
+    bound is open to full depth (index n_layers = the post-final-norm state): last-layer /
+    lm_head finetunes demonstrably shift style, so the search may source its direction there
+    and let the fragility guards price it."""
     if axis == "euphemism":
-        return int(0.05 * n_layers), int(0.95 * n_layers)
-    return int(0.15 * n_layers), int(0.85 * n_layers)
+        return int(0.05 * n_layers), n_layers
+    return int(0.15 * n_layers), n_layers
 
 
 def _flat(replies_by_scen):
     return [r for scen in replies_by_scen for r in scen]
+
+
+def _measured_seed(n_layers: int) -> dict | None:
+    """Warm-start params from each axis's measured write-attribution profile (saved by
+    direction.py in the direction artifact): kernel centered on the cum-mass median,
+    half-width from the quartile spread — the first trial starts where the style is
+    actually written instead of a blind TPE draw. max/min_weight and mlp_scale stay
+    mid-range for TPE to refine. None if any artifact predates the write_attr field."""
+    params = {}
+    for a in AXES:
+        q = torch.load(directions_path(a), weights_only=False).get("attr_q")
+        if not q:
+            return None
+        pre = f"{a}_" if MULTI else ""
+        params.update({
+            f"{pre}per_layer": True,
+            f"{pre}max_weight": 0.8,
+            f"{pre}max_pos": min(max(q[0.5] / (n_layers - 1), 0.2), 1.0),
+            f"{pre}min_weight": 0.1,
+            f"{pre}min_dist": min(max((q[0.75] - q[0.25]) / (n_layers - 1), 0.1), 1.0),
+            f"{pre}mlp_scale": 0.5,
+        })
+    return params
+
+
+def _seed_study(study: optuna.Study, n_layers: int) -> None:
+    """Enqueue the measured-kernel trial on a study with no prior trials (fresh run or
+    first run). A resumed study already has real completions — TPE knows better by then."""
+    if study.trials:
+        return
+    seed = _measured_seed(n_layers)
+    if seed:
+        print(f"trial 0 seeded from measured write attribution: {seed}")
+        study.enqueue_trial(seed)
+    else:
+        print("no write_attr in direction artifact(s) -- re-run depurple.direction to "
+              "enable measured kernel seeding; starting from a blind TPE draw")
 
 
 # Same line Optuna emits per completed trial (mirrors serve.resolve_params' parser):
@@ -243,7 +282,7 @@ def _kernel_distributions(n_layers: int, axis: str = AXIS, prefix: str = "") -> 
         f"{prefix}per_layer": CategoricalDistribution([True, False]),
         f"{prefix}dir_layer": IntDistribution(lo, hi),
         f"{prefix}max_weight": FloatDistribution(0.2, 1.0),
-        f"{prefix}max_pos": FloatDistribution(0.2, 0.9),
+        f"{prefix}max_pos": FloatDistribution(0.2, 1.0),
         f"{prefix}min_weight": FloatDistribution(0.0, 0.4),
         f"{prefix}min_dist": FloatDistribution(0.1, 1.0),
         f"{prefix}mlp_scale": FloatDistribution(0.0, 1.0),
@@ -397,7 +436,7 @@ def run_joint(args) -> None:
             kernel = build_kernel(
                 n_layers,
                 trial.suggest_float(f"{a}_max_weight", 0.2, 1.0),
-                trial.suggest_float(f"{a}_max_pos", 0.2, 0.9),
+                trial.suggest_float(f"{a}_max_pos", 0.2, 1.0),
                 trial.suggest_float(f"{a}_min_weight", 0.0, 0.4),
                 trial.suggest_float(f"{a}_min_dist", 0.1, 1.0),
             )
@@ -457,6 +496,7 @@ def run_joint(args) -> None:
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=0))
     n_replayed = 0 if args.fresh else replay_log(study, args.resume_from, _joint_distributions(n_layers))
+    _seed_study(study, n_layers)
     _attach_log_file(LOG, fresh=args.fresh)
     remaining = max(0, args.trials - len(study.trials))
     if n_replayed:
@@ -600,7 +640,7 @@ def main() -> None:
         kernel = build_kernel(
             n_layers,
             max_weight=trial.suggest_float("max_weight", 0.2, 1.0),
-            max_pos=trial.suggest_float("max_pos", 0.2, 0.9),
+            max_pos=trial.suggest_float("max_pos", 0.2, 1.0),
             min_weight=trial.suggest_float("min_weight", 0.0, 0.4),
             min_dist=trial.suggest_float("min_dist", 0.1, 1.0),
         )
@@ -679,6 +719,7 @@ def main() -> None:
     study = optuna.create_study(direction="minimize",
                                 sampler=optuna.samplers.TPESampler(seed=0))
     n_replayed = 0 if args.fresh else replay_log(study, args.resume_from, _kernel_distributions(n_layers))
+    _seed_study(study, n_layers)
     _attach_log_file(LOG, fresh=args.fresh)   # after replay, so replayed trials aren't re-logged
     remaining = max(0, args.trials - len(study.trials))
     if n_replayed:

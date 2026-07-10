@@ -141,6 +141,16 @@ def diagnose() -> None:
     print(f"  GATE #3 survive<0.5 => under-ablate:  {'YES (re-tune kernel)' if survive[mid].min() < 0.5 else 'no'}")
 
 
+def write_attr(plain: torch.Tensor, purple: torch.Tensor, direction: torch.Tensor):
+    """Per-layer write attribution onto d̂[l+1]: pooled() is linear, so pooled[:, l+1] -
+    pooled[:, l] is layer l's residual write — project it on the direction, pos minus neg.
+    Returns (attr [L], cum-mass [L], quartile layers {0.25/0.5/0.75: layer})."""
+    attr = ((purple.diff(dim=1) - plain.diff(dim=1)) * direction[1:]).sum(-1).mean(0)
+    mass = attr.clamp(min=0)
+    cum = mass.cumsum(0) / mass.sum().clamp(min=1e-8)
+    return attr, cum, {p: int((cum >= p).nonzero()[0]) for p in (0.25, 0.50, 0.75)}
+
+
 def layers() -> None:
     """Per-layer write attribution: how much each decoder layer WRITES along d̂, pos minus neg.
     pooled() is linear in the hidden states, so pooled[:, l+1] - pooled[:, l] is the pooled
@@ -161,16 +171,13 @@ def layers() -> None:
         best = int(((purple * direction).sum(-1) > (plain * direction).sum(-1)).float().mean(0).argmax())
         src = "computed in-place (no artifact)"
 
+    per, cum, q = write_attr(plain, purple, direction)             # [L] onto d̂[l+1] (per_layer=True)
     w_pos, w_neg = purple.diff(dim=1), plain.diff(dim=1)           # [N, L, d] write of layer l
-    per = ((w_pos - w_neg) * direction[1:]).sum(-1).mean(0)        # [L] onto d̂[l+1] (per_layer=True)
     fixed = ((w_pos - w_neg) * direction[best]).sum(-1).mean(0)    # [L] onto d̂[best] (dir_layer)
     scale = w_pos.norm(dim=-1).mean(0)                             # [L] mean write norm: residual
     frac = per / scale.clamp(min=1e-8)                             # growth-corrected share of the write
-
     mass = per.clamp(min=0)                                        # headline = per-layer basis (matches
-    cum = mass.cumsum(0) / mass.sum().clamp(min=1e-8)              # the per_layer=True default kernel)
-    q = {p: int((cum >= p).nonzero()[0]) for p in (0.25, 0.50, 0.75)}
-    L = len(per)
+    L = len(per)                                                   # the per_layer=True default kernel)
     print(f"\n=== write attribution: axis={AXIS}  {len(pairs)} pairs  {L} layers  d from {src} ===")
     print("  layer   per-layer d̂   /write-norm    fixed d̂[best]   cum%")
     top = mass.max().clamp(min=1e-8)
@@ -218,11 +225,17 @@ def main() -> None:
     for L in range(0, len(acc), 4):
         print(f"  layer {L:2d}: acc={acc[L]:.3f} sep={sep[L]:+.3f}")
 
+    # Measured per-layer write profile (see write_attr): optimize.py seeds its first trial's
+    # kernel from the quartiles instead of assuming where the style lives.
+    attr, _, attr_q = write_attr(plain, purple, direction)
+    print(f"write attribution: cum-mass 25/50/75% at layers "
+          f"{attr_q[0.25]}/{attr_q[0.5]}/{attr_q[0.75]} of {len(attr)}")
+
     OUT.parent.mkdir(exist_ok=True)
     # Keep raw r + the stripped axis regardless of PROJECT so the choice is auditable/reversible.
     torch.save({"direction": direction, "raw_r": raw_r, "proj_axis": proj_axis,
-                "project": PROJECT, "acc": acc, "sep": sep,
-                "best_layer": best, "model": MODEL, "axis": AXIS}, OUT)
+                "project": PROJECT, "acc": acc, "sep": sep, "best_layer": best,
+                "write_attr": attr, "attr_q": attr_q, "model": MODEL, "axis": AXIS}, OUT)
     print(f"saved {OUT}  (project={PROJECT!r})")
     assert acc[best] > 0.8, (f"{AXIS} not linearly separable after PROJECT={PROJECT!r} "
                              f"(best acc {acc[best]:.3f}) -> this projection destroys the axis; abort")
