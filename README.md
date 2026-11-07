@@ -12,6 +12,12 @@ Two tools for taming prose style, built on the same dataset and scorer:
   separating purple/plain in matched pairs, orthogonalize `o_proj`/`down_proj` against it. 
   The trained classifier is its scorer; objective is classifier score over rollouts, not KL vs. base.
 
+- **Paragraph classifier** (`purple_para`) — the same gate one paragraph at a time, for modern
+  slop that only shows in aggregate (filler beats, micro-beats, camouflaged staccato) and that a
+  sentence head scores as clean. Trained on graded Haiku 5.5 paragraphs plus the purple sentence
+  rows as one-sentence paragraphs. Classifier only — not a depurple axis. See
+  [data/purple_para/README.md](data/purple_para/README.md).
+
 Both run on `DEPURPLE_AXIS` (`purple`, `euphemism`, or jointly). Switching the axis shifts
 all paths and artifact names automatically; the pipeline is identical for each.
 
@@ -73,7 +79,7 @@ unset/empty. Export them before running anything (incl. `--demo` and self-checks
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `DEPURPLE_AXIS` | **required** | Which style axis to work on: `purple` or `euphemism`. Comma-separate both (`purple,euphemism`) for one joint depurple edit. Drives every data/model path in the repo. |
+| `DEPURPLE_AXIS` | **required** | Which style axis to work on: `purple` or `euphemism` (or `purple_para`, the paragraph classifier; classifier steps only). Comma-separate both (`purple,euphemism`) for one joint depurple edit. Drives every data/model path in the repo. |
 | `ETTIN_MODEL` | **required** | Which encoder to fine-tune, e.g. `jhu-clsp/ettin-encoder-400m` (68m/150m/400m sizes exist). |
 | `DEPURPLE_MODEL` | **required** | Base LLM that depurple edits, e.g. `google/gemma-4-E4B-it`. |
 | `OPENAI_BASE_URL` | api.openai.com | Endpoint for the LLM data-gen scripts — point at OpenRouter, vLLM, or a local llama.cpp server instead. |
@@ -81,6 +87,7 @@ unset/empty. Export them before running anything (incl. `--demo` and self-checks
 | `OPENAI_API_KEY` | `sk-noauth` | API key for that endpoint; local servers ignore it. |
 | `DEPURPLE_AXIS_WEIGHTS` | `1.0,…` | In a joint depurple run, how much each axis counts toward the objective (one weight per axis, in order). |
 | `DEPURPLE_STRENGTH` | `1.0` | How hard to apply the edit in `serve.py`/`eyeball.py` — `0` is the base model, `1` is the full edit. Serve at `0.6–0.9` to soften. |
+| `PURPLE_PARAGRAPHS_SRC` | `../OrbRewriter/data/external/purple_paragraphs` | `purple_para` only: the read-only graded paragraph set `datagen.import_paragraphs` reads. |
 | `DEPURPLE_PROJECT` | auto per axis | Advanced: refines the style direction before it's baked in, to strip out a confound (e.g. sentence length) it would otherwise absorb. Chosen automatically per axis — override only for experiments. |
 | `DEPURPLE_NORM_PRESERVE` | auto per axis | Advanced: whether to restore each edited weight's magnitude after ablation. Auto-coupled to `DEPURPLE_PROJECT` — override only for experiments. |
 | `MODEL_DIR`, `MAX_CHARS`, `MAX_SENTENCES` | `models/ettin400m-purple`, `100000`, `2000` | `app.py` serving only: which trained classifier to load, plus input-size caps. **`MODEL_DIR`'s default is a fixed path, not derived from `DEPURPLE_AXIS`/`ETTIN_MODEL`** — set it explicitly if you're serving a different axis or encoder size. |
@@ -94,17 +101,24 @@ the same way (`python -m <pkg>.<module>`), in operation order datagen → classi
 core/
   paths.py                   DEPURPLE_AXIS+ETTIN_MODEL -> all data/<axis>/ + classifier paths;
                              single source BOTH halves import (AXES, classifier_dir, pairs_path)
+                             + the axis's scoring unit (sentence | paragraph) and token budget
+  model_meta.py              chartreuse.json in a model dir: unit + max_length its consumers score at
 datagen/                     build the dataset      (python -m datagen.<module>)
   generate_synthetic.py      Plain seed -> purple rewrite pairs (LLM)
   import_text.py             Whole docs -> sentence-split label-0 curated rows
+  import_paragraphs.py       purple_para: graded Haiku paragraphs -> interim/ (cleaned, source split kept)
+  grade_paragraphs.py        purple_para: human paragraphs -> blind Haiku grades -> interim/human_graded
+  augment_filler.py          purple_para: filler / negation beats + concrete controls in clean train paragraphs
   build_dataset.py           Pool per-axis + shared _common/ -> validate + dedupe + leak-safe split
 classifier/                  train/eval the classifier  (python -m classifier.<module>)
   sanity_check.py            Load base encoder as a 2-class head (smoke test)
-  train.py                   Fine-tune ettin -> models/ettin400m-<axis>, best-by-val-F1
+  train.py                   Fine-tune ettin -> models/ettin400m-<axis>, best-by-val-F1 (--seed, --out)
   calibrate.py               Pick operating threshold on calibration split -> threshold.json
   evaluate.py                Report P/R/F1 + confusion + FPs/FNs on test split
   quantize.py                Export int8 ONNX for CPU/RAM-only inference
+  export_gguf.py             Export q8_0 GGUF for llama.cpp (Orb's slop classifier) + parity check
   predict.py                 Score stdin sentences via int8 ONNX (no torch/GPU)
+  reward.py                  purple_para: P(purple) per text for a reward function (seed ensemble, split-proof)
 depurple/                    bake the style edit      (python -m depurple.<module>)
   _model.py                  DEPURPLE_MODEL/AXIS -> depurple artifact paths; facade over core/paths.py
   direction.py               Per-layer style direction from matched pairs -> directions-*.pt
@@ -227,6 +241,10 @@ Calibration/test must hold real human rows or these steps no-op.
 python -m classifier.quantize --check             # -> models/ettin400m-<axis>-onnx-int8 (vs torch on test)
 echo "The sun bled its dying gold." | python -m classifier.predict   # int8, no GPU
 python app.py                              # web app: paste text -> per-sentence P(purple)
+# Orb (llama.cpp) wants GGUF, not ONNX. --check serves it with Orb's own llama-server + flags:
+LLAMA_CPP_DIR=~/llama.cpp python -m classifier.export_gguf --check \
+  --server-bin ../Orb/backend/data/llama-bin/cpu    # -> models/ettin400m-<axis>-gguf/*-q8_0.gguf
+# then in Orb: ORB_SLOP_MODEL=/abs/path/to/that.gguf ./run_unix.sh
 ```
 
 **Depurple** — bake the style edit into an LLM, using the trained classifier as scorer.

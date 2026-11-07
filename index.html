@@ -76,16 +76,17 @@ function esc(s) {
 
 function render(data) {
   const { sentences, purple_count } = data;
-  if (!sentences.length) { out.innerHTML = `<p class="summary">No sentences found.</p>`; return; }
+  const unit = data.unit === "paragraph" ? "paragraph" : "sentence";
+  if (!sentences.length) { out.innerHTML = `<p class="summary">No ${unit}s found.</p>`; return; }
   const body = sentences.map((s) => {
     const t = esc(s.text);
     if (!s.purple) return t;
     const pct = Math.round(s.prob * 100);
     return `<mark title="P(purple) = ${pct}%">${t}<sup>${pct}</sup></mark>`;
-  }).join(" ");
+  }).join(unit === "paragraph" ? "<br><br>" : " ");
   out.innerHTML =
     `<p class="summary"><b>${purple_count}</b> of <b>${sentences.length}</b> ` +
-    `sentence${sentences.length === 1 ? "" : "s"} flagged as purple.</p>` +
+    `${unit}${sentences.length === 1 ? "" : "s"} flagged as purple.</p>` +
     `<div class="result">${body}</div>`;
 }
 

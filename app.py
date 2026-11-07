@@ -1,8 +1,8 @@
 """Purple-prose classifier web app.
 
 Serves a single-page frontend (index.html) and one JSON endpoint: it segments
-the pasted text into sentences (text_segmentation.split_sentences), scores every
-sentence with the fine-tuned ettin classifier on the GPU in one batched forward
+the pasted text into sentences (text_segmentation.split_sentences) -- or paragraphs, for a
+paragraph-unit model -- scores every segment with the fine-tuned ettin classifier on the GPU in one batched forward
 pass, and returns each sentence with P(purple) and the purple/not decision at the
 calibrated threshold. Scoring mirrors classifier/evaluate.py's predict_probs so
 probabilities match the offline numbers the threshold was calibrated against.
@@ -19,7 +19,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from text_segmentation import split_sentences
+from core import model_meta
+from text_segmentation import split_paragraphs, split_sentences
 
 MODEL_DIR = os.environ.get("MODEL_DIR", "models/ettin400m-purple")
 MAX_CHARS = int(os.environ.get("MAX_CHARS", "100000"))     # trust-boundary guard
@@ -29,6 +30,11 @@ HERE = Path(__file__).parent
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _tok = AutoTokenizer.from_pretrained(MODEL_DIR)
 _model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR).to(DEVICE).eval()
+# A paragraph-unit model (models/*-purple_para) scores one paragraph per segment; the unit and
+# token budget come from the model dir's chartreuse.json, absent -> sentence/128.
+_META = model_meta.read(MODEL_DIR)
+UNIT, MAX_LEN = _META["unit"], _META["max_length"]
+segment = split_paragraphs if UNIT == "paragraph" else split_sentences
 
 
 def _threshold() -> float:
@@ -51,7 +57,7 @@ def score(sentences: list[str], batch: int = 64) -> list[float]:
     probs: list[float] = []
     for i in range(0, len(sentences), batch):
         enc = _tok(sentences[i:i + batch], return_tensors="pt", padding=True,
-                   truncation=True, max_length=128).to(DEVICE)
+                   truncation=True, max_length=MAX_LEN).to(DEVICE)
         probs.extend(_model(**enc).logits.softmax(-1)[:, 1].tolist())
     return probs
 
@@ -70,11 +76,12 @@ def index():
 
 @app.post("/api/detect")
 def detect(req: Req):
-    sentences = split_sentences(req.text[:MAX_CHARS])[:MAX_SENTENCES]
+    sentences = [s.strip() for s in segment(req.text[:MAX_CHARS])][:MAX_SENTENCES]
     probs = score(sentences) if sentences else []
     results = [{"text": s, "prob": round(p, 4), "purple": p >= THRESHOLD}
                for s, p in zip(sentences, probs)]
-    return {"threshold": THRESHOLD,
+    # key stays "sentences" for the frontend; `unit` says what each segment is
+    return {"threshold": THRESHOLD, "unit": UNIT,
             "purple_count": sum(r["purple"] for r in results),
             "sentences": results}
 
@@ -84,4 +91,4 @@ if __name__ == "__main__":
     a, b = score(["The sun bled its dying gold across the bruised and weeping hills.",
                   "The committee published the revised schedule on Tuesday."])
     assert a > b, (a, b)
-    print(f"selfcheck OK  purple={a:.3f} plain={b:.3f} threshold={THRESHOLD:.3f} device={DEVICE}")
+    print(f"selfcheck OK  purple={a:.3f} plain={b:.3f} threshold={THRESHOLD:.3f} unit={UNIT} device={DEVICE}")

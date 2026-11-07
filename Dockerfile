@@ -8,6 +8,8 @@ COPY requirements-serve.txt .
 RUN pip install --no-cache-dir -r requirements-serve.txt
 
 COPY app.py index.html text_segmentation.py ./
+# only the env-free part of core/: app.py reads the model's unit/max_length through it
+COPY core/__init__.py core/model_meta.py core/
 
 # Which trained classifier to bake in. Tracks the encoder slug from core/paths.py;
 # override per encoder/axis at build:  docker build --build-arg MODEL_DIR=models/ettin150m-purple ...
@@ -18,12 +20,14 @@ ARG MODEL_DIR=models/ettin400m-purple
 # or the ONNX export. Baked to a fixed internal path so the image stops depending on the slug;
 # app.py reads it via the MODEL_DIR env set below. The threshold COPY also fails the build loud
 # if you forgot to calibrate — better than silently shipping the wrong operating point.
+# chartreuse.jso[n] is a glob so a pre-paragraph model without one still builds (-> sentence unit).
 COPY ${MODEL_DIR}/config.json \
      ${MODEL_DIR}/model.safetensors \
      ${MODEL_DIR}/tokenizer.json \
      ${MODEL_DIR}/tokenizer_config.json \
      ${MODEL_DIR}/special_tokens_map.json \
      ${MODEL_DIR}/threshold.json \
+     ${MODEL_DIR}/chartreuse.jso[n] \
      models/classifier/
 ENV MODEL_DIR=models/classifier
 

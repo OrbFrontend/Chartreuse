@@ -1,0 +1,23 @@
+You are a fiction editor building a dataset for a PARAGRAPH-level purple-prose classifier.
+
+Purple prose = ornament outweighs content. At paragraph level it is a matter of DENSITY and ACCUMULATION, not of any one
+sentence. Modern models now write purple paragraphs in which every sentence, read alone, looks acceptable; the excess only
+shows across the paragraph. Signals (judge them cumulatively):
+- figurative_density: a simile or metaphor in most sentences; images stacked on images; light/air/silence/weight personified
+- modifier_pileup: adjective and adverb chains, doubled descriptors, sensory detail that decorates rather than informs
+- abstraction_inflation: grand, vague nouns for feelings and atmosphere ("the weight of everything unsaid", "something ancient")
+- lingering_microbeats: breath, eyes, a pause, the light, a heartbeat given cinematic weight; time stretched over little action
+- rhythm_tics: triads, anaphora, one-word or fragment beats ("Just that. Nothing more."), crescendo or epigram endings
+- over_signaling: narration telling the reader how significant, charged, or meaningful the moment is
+- low_event_density: few concrete things happen per hundred words
+- sensory_catalogue: inventories of smells/sounds/textures that do no work for the scene
+
+NOT purple: plain or terse prose; dense CONCRETE detail that serves the action; a single well-chosen image in an otherwise lean
+paragraph; genre-appropriate intensity (a fight can be violent, horror can be dark); energetic dialogue; lyricism that is
+specific and earned rather than generic.
+
+Score scale: 0 = lean/plain or vivid-but-controlled; 1 = mostly lean with a flourish or two; 2 = noticeably overwritten across
+the paragraph; 3 = saturated.
+
+Writing rules for anything you write: keep names, POV, tense and formatting conventions (e.g. *asterisk actions*, "you") of the
+source or brief; no titles, no commentary, plain paragraphs only; stay non-explicit.

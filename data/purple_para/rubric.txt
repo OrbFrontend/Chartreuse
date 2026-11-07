@@ -1,0 +1,35 @@
+You are a fiction editor building a dataset for a PARAGRAPH-level classifier of purple prose and modern LLM filler.
+
+A paragraph fails when its words do not buy events, information or character. At paragraph level this is a matter of DENSITY
+and ACCUMULATION, not of any one sentence. Modern models write failing paragraphs in which every sentence, read alone, looks
+acceptable and even plain; the excess only shows across the paragraph. There are two families. Judge all signals cumulatively.
+
+ORNAMENT (classic purple):
+- figurative_density: a simile or metaphor in most sentences; images stacked on images; light/air/silence/weight personified
+- modifier_pileup: adjective and adverb chains, doubled descriptors, sensory detail that decorates rather than informs
+- abstraction_inflation: grand, vague nouns for feelings and atmosphere ("the weight of everything unsaid", "something ancient")
+- sensory_catalogue: inventories of smells/sounds/textures that do no work for the scene
+
+FILLER (modern LLM slop; it needs no ornate vocabulary to fail):
+- filler_beats: sentences that carry no event or information. Breath/pause/silence beats ("A pause.", "A breath.", "The silence
+  stretches."), shift beats ("Something in the air changes."), tag fragments ("Just that.", "Nothing more.", "Not yet."),
+  narrator comment ("And that's the worst part.", "It is the waiting that matters.")
+- negation_spam: narrating what is NOT: what characters do not do, say or feel, and what does not happen ("She doesn't look
+  away.", "He doesn't answer.", "Nobody moves.", "The door stays closed."); negative definitions ("It isn't fear. It's
+  something older."; "not X, but Y"); negated inventories ("No door. No window. No way out."). Each one fills a slot where an
+  event could be.
+- lingering_microbeats: breath, eyes, a glance, the light, a heartbeat given cinematic weight; time stretched over little action
+- atmospheric_staccato: short sentences and fragments that carry mood, significance or rhythm instead of facts. Contrast terse
+  prose, where every short sentence carries a concrete action, object or fact: that is NOT a failure.
+- over_signaling: narration telling the reader how significant, charged, or meaningful the moment is
+- rhythm_tics: triads, anaphora, crescendo or epigram endings
+- low_event_density: few concrete things happen per hundred words
+
+NOT a failure: plain or terse prose; dense CONCRETE detail that serves the action; a single well-chosen image in an otherwise
+lean paragraph; genre-appropriate intensity (a fight can be violent, horror can be dark); energetic dialogue; lyricism that is
+specific and earned rather than generic. A negation that IS the event is not filler: a character refusing to answer a direct
+question, a lock that does not open when tried, an expected person who is not there.
+
+Score scale: 0 = lean/plain or vivid-but-controlled; 1 = mostly lean with one flourish OR one filler/negation beat; 2 =
+noticeably overwritten or padded across the paragraph -- several ornaments, or two or more filler/negation beats, or a quarter
+or more of its sentences carrying no event; 3 = saturated, ornament or filler in most sentences.

@@ -18,6 +18,10 @@ Splitting:
     hard-negative twin (same group_id) never straddle the split (leakage). Group assignment is a
     deterministic hash of group_id, so re-running is stable.
 
+A PARAGRAPH axis (core.paths.UNITS, e.g. purple_para) takes build_paragraph() instead: its own
+paragraph rows keep their source split, its sentence axis's rows join as one-sentence paragraphs,
+and every row carries `unit`. See data/purple_para/README.md.
+
     python -m datagen.build_dataset            # build everything
     python -m datagen.build_dataset --demo      # self-check, no files
 """
@@ -25,10 +29,12 @@ import argparse
 import hashlib
 import json
 import re
+import statistics
 import sys
+from collections import Counter
 from pathlib import Path
 
-from core.paths import (INTERIM, HUMAN, CURATED, COMMON, AXIS, pair_paths,
+from core.paths import (DATA, INTERIM, HUMAN, CURATED, COMMON, AXIS, UNIT, SENTENCE_MIX, pair_paths,
                         LABELED as OUT_LABELED, SPLITS as OUT_SPLITS)
 
 VAL_FRAC = 0.15        # of train/val groups held out for model selection (early-stop on F1)
@@ -45,6 +51,16 @@ def is_single_sentence(text: str) -> bool:
     The linguistic 'exactly one terminal mark' rule is upstream's job (3a-3c QA'd it); enforcing it
     here would wrongly drop valid quoted dialogue / abbreviations, so we only warn on it below."""
     return bool(text) and "\n" not in text and "\r" not in text and len(text.strip()) >= 3
+
+
+def is_paragraph(text: str) -> bool:
+    """Paragraph-unit integrity: non-empty, no BLANK line (that would be two paragraphs under
+    text_segmentation.split_paragraphs). A single newline inside an RP paragraph is legitimate."""
+    return bool(text) and "\r" not in text and not re.search(r"\n\s*\n", text) and len(text.strip()) >= 3
+
+
+def valid(r: dict) -> bool:
+    return is_paragraph(r["text"]) if r.get("unit") == "paragraph" else is_single_sentence(r["text"])
 
 
 # ponytail: heuristic only -> a terminator + space + capital. Misfires on "Mr. Smith"; used for a
@@ -81,31 +97,32 @@ def pair_rows(p: dict, source: str) -> list[dict]:
             row(p["pos"], 1, source, p["group_id"], real == "pos")]
 
 
-def load_pool() -> list[dict]:
+def load_pool(data_dir: Path = DATA, axis: str = AXIS) -> list[dict]:
     """All non-human rows, unified. Mined rows get a synthetic group_id from their text hash so the
     split groups them individually (no pair to keep together).
 
     Order matters for dedup: first occurrence of a normalized text wins, so curated (hand-authored,
     most trusted) is loaded FIRST -- its label overrides any conflicting auto-generated duplicate."""
+    interim = data_dir / "interim"
     out = []
-    for r in read_jsonl(CURATED):                           # committed hand-authored -> wins dedup conflicts
+    for r in read_jsonl(data_dir / "curated.jsonl"):        # committed hand-authored -> wins dedup conflicts
         gid = r.get("group_id") or "curated_" + hashlib.md5(norm(r["text"]).encode()).hexdigest()[:12]
         out.append(row(r["text"], r["label"], r.get("source", "curated"), gid, r.get("is_real", True)))
-    for pf in pair_paths(AXIS):                            # every pair corpus (generated + curated) -> neg(0)/pos(1)
+    for pf in pair_paths(axis):                            # every pair corpus (generated + curated) -> neg(0)/pos(1)
         for p in read_jsonl(Path(pf)):                     # sorted curated-first -> wins dedup like CURATED
-            out.extend(pair_rows(p, AXIS))
-    for r in read_jsonl(INTERIM / "hard_negatives.jsonl"):
+            out.extend(pair_rows(p, axis))
+    for r in read_jsonl(interim / "hard_negatives.jsonl"):
         out.append(row(r["text"], r["label"], "hard_neg", r["group_id"], r.get("is_real", False)))
-    for r in read_jsonl(INTERIM / "mined_sentences.jsonl"):
+    for r in read_jsonl(interim / "mined_sentences.jsonl"):
         if r.get("genre") in ("plain", "technical"):       # label-0 by construction; purple_prone -> triage_label.py
             gid = "mined_" + hashlib.md5(norm(r["text"]).encode()).hexdigest()[:12]
             out.append(row(r["text"], 0, "mined", gid, True))
-    for r in read_jsonl(INTERIM / "triaged.jsonl"):         # LLM-labeled real -> train/val only
+    for r in read_jsonl(interim / "triaged.jsonl"):         # LLM-labeled real -> train/val only
         gid = "triaged_" + hashlib.md5(norm(r["text"]).encode()).hexdigest()[:12]
         out.append(row(r["text"], r["label"], "mined", gid, True))
-    for r in read_jsonl(INTERIM / "soft_euph_gen.jsonl"):    # gross(0)/euph-short(1) pairs, group-shared
+    for r in read_jsonl(interim / "soft_euph_gen.jsonl"):    # gross(0)/euph-short(1) pairs, group-shared
         out.append(row(r["text"], r["label"], r["source"], r["group_id"], r.get("is_real", False)))
-    for r in read_jsonl(INTERIM / "calm_neg_gen.jsonl"):     # calm non-sexual hard negs (label 0)
+    for r in read_jsonl(interim / "calm_neg_gen.jsonl"):     # calm non-sexual hard negs (label 0)
         out.append(row(r["text"], r["label"], r["source"], r["group_id"], r.get("is_real", False)))
     for r in read_jsonl(COMMON):                             # axis-SHARED common negatives -> label 0
         gid = r.get("group_id") or "common_" + hashlib.md5(norm(r["text"]).encode()).hexdigest()[:12]
@@ -113,12 +130,12 @@ def load_pool() -> list[dict]:
     return out
 
 
-def load_human() -> list[dict]:
+def load_human(path: Path = HUMAN) -> list[dict]:
     # ponytail: human rows are independent real sentences (no synthetic twin), so each gets its own
     # text-hash group. Ignore any incoming group_id -- the labeler reused one id for 139 rows, which
     # would dump them all onto one side of the calib/test split.
     out = []
-    for r in read_jsonl(HUMAN):
+    for r in read_jsonl(path):
         gid = "human_" + hashlib.md5(norm(r["text"]).encode()).hexdigest()[:12]
         out.append(row(r["text"], r["label"], "human", gid, True))
     return out
@@ -130,7 +147,7 @@ def dedupe_validate(rows: list[dict]) -> tuple[list[dict], int, int, int]:
     -- pool order puts curated first, so curated's label is authoritative)."""
     seen, kept, dup, bad, conflict = {}, [], 0, 0, 0
     for r in rows:
-        if not is_single_sentence(r["text"]):
+        if not valid(r):
             bad += 1
             continue
         k = norm(r["text"])
@@ -154,8 +171,206 @@ def write(path: Path, rows: list[dict]):
     path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
 
 
+HELDOUT_HUMAN_FRAC = 0.30   # graded human paragraphs held out for calibration + test (by doc group)
+
+
+def assign_paragraph_split(r: dict) -> str | None:
+    """Split for a paragraph-axis row. None = drop.
+
+    haiku_paragraphs (import_paragraphs.py) keep the SOURCE split: test stays the held-out test
+    (it is OrbRewriter's modern_slop eval); half the source-val groups become calibration, keeping
+    only rows whose blind audits all agreed, so the 0.90-precision gate is set on clean labels;
+    calibration-group rows with split audits are dropped so a group never straddles val/calib.
+    human_graded (grade_paragraphs.py) and sentence rows: held-out human share -> calib/test by
+    group hash, the rest -> train/val by group hash."""
+    if "split" in r:
+        if r["split"] in ("train", "test"):
+            return r["split"]
+        if bucket(r["group_id"], 0.5, "calib"):
+            return "calibration" if r.get("audit_agree") else None
+        return "val"
+    if r.get("heldout"):
+        return "test" if bucket(r["group_id"], TEST_FRAC, "test") else "calibration"
+    return "val" if bucket(r["group_id"], VAL_FRAC, "val") else "train"
+
+
+NATURAL = {"reply", "native", "real"}   # labelled by the graders' vote; synthetic variants are labelled by construction
+
+
+LLM_SOURCES = ("haiku", "aug_", "appdb")   # Haiku output, Haiku-augmented copies, Orb app.db LLM drafts
+
+
+def synthetic(r: dict) -> bool:
+    """Model-written text. appdb rows carry is_real (they are real app traffic), but an LLM wrote them."""
+    return not r.get("is_real") or str(r.get("source", "")).startswith(LLM_SOURCES)
+
+
+def tic_relabel(r: dict, c: Counter) -> dict:
+    """A Haiku-generated label-0 row carrying a house tic (datagen/tics.py) becomes label 1, whatever the vote
+    or construction said: the Haiku grader passes its own stock moves as "one flourish" = clean. The label is
+    by rule, so `audit_agree` is set and the row may calibrate. Human-written rows never come through here."""
+    from datagen.tics import tics
+    if r["label"] != 0:
+        return r
+    found = tics(r["text"])
+    if not found:
+        return r
+    c[f"{r.get('variant')} tic 0->1"] += 1
+    return {**r, "label": 1, "tics": found, "audit_agree": True}
+
+
+def apply_regrade(rows: list[dict]) -> list[dict]:
+    """Join the current-rubric votes (grade_paragraphs --set haiku) onto the imported Haiku rows.
+
+    Natural rows take the majority side of the new votes (tie -> dropped). Synthetic variants keep
+    their by-construction label -- camouflaged=1 vs terse=0 is the contrast they exist for -- and the
+    votes only re-score `audit_agree`, which gates calibration. A row without >= 2 current-rubric
+    votes is dropped: one dataset never mixes two rubrics' labels. No grades file -> source labels."""
+    from datagen.grade_paragraphs import RUBRIC, label as vote, rubric_tag
+    path = INTERIM / "haiku_grades.jsonl"
+    if not path.exists():
+        print("  note: no haiku_grades.jsonl -- using the source (v1 rubric) labels")
+        return rows
+    tag = rubric_tag(RUBRIC.read_text(encoding="utf-8"))
+    votes = {norm(g["text"]): g["audit_scores"] for g in read_jsonl(path) if g.get("rubric") == tag}
+    out, c = [], Counter()
+    for r in rows:
+        a = votes.get(norm(r["text"]), [])
+        if len(a) < 2:
+            c["no current-rubric votes (dropped)"] += 1
+            continue
+        if r["variant"] in NATURAL:
+            lab = vote(a)
+            if lab is None:
+                c["tied (dropped)"] += 1
+                continue
+            if lab != r["label"]:
+                c[f"{r['variant']} relabelled {r['label']}->{lab}"] += 1
+            r = {**r, "label": lab, "score": round(statistics.median(a))}
+        r = {**r, "audit_scores": a, "audit_agree": all((s >= 2) == bool(r["label"]) for s in a), "rubric": tag}
+        out.append(r if r.get("is_real") else tic_relabel(r, c))       # appdb "real" rows are not Haiku's
+    print(f"  regrade {tag}: {len(rows)} -> {len(out)}  {dict(sorted(c.items()))}")
+    return out
+
+
+def human_negatives() -> list[dict]:
+    """Graded human paragraphs, NEGATIVES ONLY: graded-clean rows are label 0; graded-purple ones are
+    left out of every split. The axis targets LLM slop -- the rubric would otherwise teach that dense
+    literary human prose (McCarthy grades [2,2,2]) is purple -- yet purple fanfic is never forced to 0."""
+    from datagen.grade_paragraphs import RUBRIC, rubric_tag
+    tag = rubric_tag(RUBRIC.read_text(encoding="utf-8"))
+    rows = list(read_jsonl(INTERIM / "human_graded.jsonl"))
+    stale = sum(r.get("rubric") != tag for r in rows)
+    if stale:
+        raise SystemExit(f"FATAL: {stale} human_graded rows were graded under another rubric than rubric.txt "
+                         f"({tag}) -- rerun datagen.grade_paragraphs --set human")
+    keep = [r for r in rows if r["label"] == 0]
+    if rows:
+        print(f"  human paragraphs: {len(rows)} graded -> {len(keep)} clean kept, "
+              f"{len(rows) - len(keep)} graded purple left out")
+    return keep
+
+
+def augmented() -> list[dict]:
+    """Graded filler / concrete-control copies of clean train paragraphs (datagen.augment_filler). Labels are
+    the current rubric's majority vote; a file graded under another rubric is refused, as for human_graded."""
+    from datagen.grade_paragraphs import RUBRIC, rubric_tag
+    rows = [r for f in sorted(INTERIM.glob("aug_graded*.jsonl")) for r in read_jsonl(f)]
+    if not rows:
+        return []
+    tag = rubric_tag(RUBRIC.read_text(encoding="utf-8"))
+    stale = sum(r.get("rubric") != tag for r in rows)
+    if stale:
+        raise SystemExit(f"FATAL: {stale} aug_graded rows were graded under another rubric than rubric.txt ({tag}) "
+                         f"-- rerun datagen.grade_paragraphs --set aug")
+    t = Counter()
+    rows = [tic_relabel(r, t) for r in rows]        # every copy carries Haiku sentences (bases or inserted beats)
+    c = Counter((r.get("round", 1), r["variant"], r["label"]) for r in rows)
+    print("  filler augmentation: " + "  ".join(f"r{rd} {v}={lab}: {n}" for (rd, v, lab), n in sorted(c.items()))
+          + f"  {dict(sorted(t.items()))}")
+    return rows
+
+
+def build_paragraph():
+    """Paragraph axis: own paragraph rows + the sentence axis's rows as one-sentence paragraphs.
+
+    Priority for dedup (first normalized text wins): held-out rows first so a train copy of a
+    test text is dropped rather than leaking, then hand-curated, then the rest."""
+    mix = SENTENCE_MIX.get(AXIS)
+    rows = []
+    rows += apply_regrade(list(read_jsonl(INTERIM / "haiku_paragraphs.jsonl")))
+    for r in human_negatives():                                    # grade_paragraphs.py
+        rows.append({**r, "heldout": bucket(r["group_id"], HELDOUT_HUMAN_FRAC, "heldout")})
+    curated = [{**r, "unit": "paragraph", "group_id": r.get("group_id") or
+                "curated_" + hashlib.md5(norm(r["text"]).encode()).hexdigest()[:12]} for r in read_jsonl(CURATED)]
+    human = [{**r, "unit": "paragraph", "heldout": True} for r in load_human(HUMAN)]
+    if mix:
+        sent_dir = Path("data") / mix
+        rows += [{**r, "unit": "sentence"} for r in load_pool(sent_dir, mix)]
+        human += [{**r, "unit": "sentence", "heldout": True} for r in load_human(sent_dir / "human_labeled.jsonl")]
+    if not any(r.get("unit") == "paragraph" for r in rows):
+        raise SystemExit(f"FATAL: no paragraph rows in {INTERIM} -- run datagen.import_paragraphs first")
+
+    split_of = {}
+    for r in human + curated + rows:
+        split_of[id(r)] = assign_paragraph_split(r)
+    # filler augmentation (augment_filler + grade_paragraphs --set aug) follows its base's group, so the base,
+    # its filler copy and its concrete control are never split apart; bases are train-side only by construction
+    group_split = {r["group_id"]: split_of[id(r)] for r in rows}
+    aug = augmented()
+    for r in aug:
+        sp = group_split.get(r["group_id"])
+        split_of[id(r)] = sp if sp in ("train", "val") else None
+    rows += aug
+    # Synthetic text is never a negative: a Haiku / generated row is label 1 (graded, constructed or tic) or it is
+    # out. Negatives are human-written only. This removes the terse/plain/vivid/isolated controls, the concrete
+    # arm of the augmentation and the sentence axis's generated negatives.
+    syn0 = Counter(r.get("source") for r in human + curated + rows if r["label"] == 0 and synthetic(r))
+    human, curated, rows = ([r for r in part if r["label"] == 1 or not synthetic(r)] for part in (human, curated, rows))
+    print(f"  synthetic negatives dropped: {sum(syn0.values())}  {dict(syn0.most_common())}")
+    order = {"test": 0, "calibration": 1}
+    ordered = sorted(human + curated + rows, key=lambda r: order.get(split_of[id(r)], 2))  # stable
+    seen, out, dup, bad, conflict, dropped = {}, {k: [] for k in ("train", "val", "calibration", "test")}, 0, 0, 0, 0
+    for r in ordered:
+        sp = split_of[id(r)]
+        if sp is None:
+            dropped += 1
+            continue
+        if not valid(r):
+            bad += 1
+            continue
+        k = norm(r["text"])
+        if k in seen:
+            dup += 1
+            conflict += seen[k] != r["label"]
+            continue
+        seen[k] = r["label"]
+        clean = {k2: v for k2, v in r.items() if k2 not in ("split", "heldout")}
+        out[sp].append(clean)
+
+    for name, part in out.items():
+        write(OUT_SPLITS / f"{name}.jsonl", part)
+    labeled = [r for part in out.values() for r in part]
+    write(OUT_LABELED, labeled)
+
+    def units(part):
+        c = {u: sum(r.get("unit") == u for r in part) for u in ("paragraph", "sentence")}
+        return f"[{c['paragraph']} para / {c['sentence']} sent]"
+    print(f"pooled {dist(labeled)}  (dropped {dup} dup, {bad} invalid, {dropped} split-audit calib rows)")
+    if conflict:
+        print(f"  WARNING: {conflict} duplicate text(s) had conflicting labels -> kept the held-out/curated-first row")
+    for name, part in out.items():
+        print(f"  {name:<11} {dist(part)}  {units(part)}")
+    if not any(r.get("source") == "human_graded" for r in labeled):
+        print("  note: no graded human paragraphs yet (datagen.grade_paragraphs) -- the false-positive rate on "
+              "human prose is unmeasured and untrained against")
+    print(f"-> {OUT_LABELED}, {OUT_SPLITS}/{{train,val,calibration,test}}.jsonl")
+
+
 def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
+    if UNIT == "paragraph":
+        return build_paragraph()
 
     pool, p_dup, p_bad, p_conf = dedupe_validate(load_pool())
     human, h_dup, h_bad, _ = dedupe_validate(load_human())
@@ -233,6 +448,57 @@ def demo():
     # shared common pool is forced to label 0 regardless of the file's own label field
     cr = row("Common prose.", 0, "common", "common_x", True)
     assert cr["label"] == 0 and cr["source"] == "common"
+
+    # paragraph unit: a single newline is fine, a blank line is two paragraphs
+    assert is_paragraph('She waits.\n"Go," he says.') and not is_paragraph("One.\n\nTwo.")
+    assert valid({"text": "a\nparagraph", "unit": "paragraph"}) and not valid({"text": "a\nsentence"})
+    # source split is kept; source test never moves; calib rows need unanimous audits
+    assert assign_paragraph_split({"split": "test", "group_id": "g"}) == "test"
+    assert assign_paragraph_split({"split": "train", "group_id": "g"}) == "train"
+    calib_gid = next(f"g{i}" for i in range(100) if bucket(f"g{i}", 0.5, "calib"))
+    assert assign_paragraph_split({"split": "val", "group_id": calib_gid, "audit_agree": True}) == "calibration"
+    assert assign_paragraph_split({"split": "val", "group_id": calib_gid, "audit_agree": False}) is None
+    assert assign_paragraph_split({"heldout": True, "group_id": "h"}) in ("test", "calibration")
+    assert assign_paragraph_split({"group_id": "h"}) in ("train", "val")
+
+    # regrade join: natural rows take the vote, synthetic keep their label, stale rubric / no votes drop
+    import tempfile
+    import datagen.grade_paragraphs as gp
+    global INTERIM
+    saved = INTERIM, gp.RUBRIC
+    tmp = Path(tempfile.mkdtemp())
+    INTERIM, gp.RUBRIC = tmp, tmp / "rubric.txt"
+    try:
+        gp.RUBRIC.write_text("v2")
+        tag = gp.rubric_tag("v2")
+        write(tmp / "haiku_grades.jsonl", [
+            {"text": "Reply one.", "audit_scores": [2, 2, 1], "rubric": tag},
+            {"text": "Camo one.", "audit_scores": [1, 2, 1], "rubric": tag},
+            {"text": "Old rubric.", "audit_scores": [3, 3, 3], "rubric": "rOLD"}])
+        rr = apply_regrade([{"text": "reply  ONE.", "label": 0, "variant": "reply"},
+                            {"text": "Camo one.", "label": 1, "variant": "camouflaged"},
+                            {"text": "Old rubric.", "label": 1, "variant": "reply"},
+                            {"text": "Never graded.", "label": 0, "variant": "plain"}])
+        assert [(r["text"], r["label"], r["audit_agree"]) for r in rr] == [
+            ("reply  ONE.", 1, False), ("Camo one.", 1, False)], rr
+        write(tmp / "human_graded.jsonl", [{"text": "a", "label": 0, "rubric": tag}, {"text": "b", "label": 1, "rubric": tag}])
+        assert [r["text"] for r in human_negatives()] == ["a"]
+        write(tmp / "aug_graded.jsonl", [{"text": "x", "label": 1, "variant": "aug:filler", "rubric": tag,
+                                           "inserted": ["A breath."]},
+                                          {"text": "y", "label": 1, "variant": "aug:filler", "rubric": tag,
+                                           "inserted": ["Something in the room shifts."]}])
+        write(tmp / "aug_graded_r2.jsonl", [{"text": "z", "label": 0, "variant": "aug:concrete", "rubric": tag,
+                                              "inserted": ["She sets the cup down."], "round": 2}])
+        assert sorted(r["text"] for r in augmented()) == ["x", "y", "z"]  # every round, every graded row
+        (tmp / "aug_graded_r2.jsonl").unlink()
+        write(tmp / "aug_graded.jsonl", [{"text": "x", "label": 1, "variant": "aug:filler", "rubric": "rOLD"}])
+        try:
+            augmented()
+            raise AssertionError("stale-rubric augmentation was accepted")
+        except SystemExit:
+            pass
+    finally:
+        INTERIM, gp.RUBRIC = saved
     print("demo ok")
 
 

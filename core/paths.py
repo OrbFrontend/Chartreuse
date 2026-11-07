@@ -64,6 +64,26 @@ COMMON = Path("data") / "_common" / "negatives.jsonl"
 # artifacts after the actual encoder so models/ettin400m-* stops lying when the model changes.
 ETTIN_MODEL = req("ETTIN_MODEL")
 
+# Scoring unit. Most axes classify ONE SENTENCE per input; a paragraph axis classifies one
+# paragraph (blank-line delimited) because the style it targets -- modern filler, micro-beats,
+# camouflaged staccato -- only exists in aggregate. A paragraph axis also pools its sentence
+# axis's rows as one-sentence paragraphs (RP is full of them, and the paragraph source has
+# none under 20 words). Not a depurple axis: it has no matched pairs.
+UNITS = {"purple_para": "paragraph"}
+SENTENCE_MIX = {"purple_para": "purple"}
+MAX_TOKENS = {"sentence": 128, "paragraph": 512}   # paragraph p99 is ~270 tokens, max ~520
+
+
+def unit_of(axis: str) -> str:
+    return UNITS.get(axis, "sentence")
+
+
+UNIT = unit_of(AXIS)
+MAX_LEN = MAX_TOKENS[UNIT]
+# Read-only paragraph source (Haiku 5.5 graded paragraphs), imported by datagen.import_paragraphs.
+PARAGRAPHS_SRC = Path(os.environ.get("PURPLE_PARAGRAPHS_SRC",
+                                     "../OrbRewriter/data/external/purple_paragraphs"))
+
 
 def _slug(model: str) -> str:
     # ponytail: ettin-encoder-400m -> ettin400m; basename for any non-ettin model. Tighten

@@ -27,6 +27,8 @@ def quantize(model_dir, out_dir):
     m = ORTModelForSequenceClassification.from_pretrained(model_dir, export=True)
     m.save_pretrained(out_dir)
     AutoTokenizer.from_pretrained(model_dir).save_pretrained(out_dir)
+    from core import model_meta
+    model_meta.copy(model_dir, out_dir)   # predict.py reads unit/max_length from here
 
     # Fuse attention/GELU/LayerNorm BEFORE quantizing — orthogonal to int8 and the
     # bigger batch=1 CPU win. level 99 = all transformer + layout opts. -> model_optimized.onnx

@@ -5,6 +5,7 @@ by validation F1, and writes it to the active classifier directory. Uses GPU if
 available.
 
   python -m classifier.train                 # default 3e-5, 4 epochs
+  DEPURPLE_AXIS=purple_para python -m classifier.train   # paragraph unit: max_length 512, batch 16
   python -m classifier.train --lr 5e-5 --epochs 5
   python -m classifier.train --demo          # no-network self-check
 """
@@ -20,11 +21,13 @@ from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
                           DataCollatorWithPadding, EarlyStoppingCallback,
                           Trainer, TrainingArguments)
 
-from core.paths import SPLITS, CLASSIFIER, ETTIN_MODEL
+from core import model_meta
+from core.paths import AXIS, SPLITS, CLASSIFIER, ETTIN_MODEL, MAX_LEN, UNIT
 
 # Base encoder is env-swappable (ETTIN_MODEL); the CLASSIFIER dir slug tracks it, so a
 # different encoder lands in its own models/<slug>-<axis> dir. Single source: core.paths.
 MODEL = ETTIN_MODEL
+LABELS = {0: "clean", 1: AXIS}
 
 
 def class_weights(path):
@@ -58,19 +61,22 @@ def metrics(eval_pred):
             "accuracy": accuracy_score(labels, preds)}
 
 
-def main(lr, epochs, batch, out):
+def main(lr, epochs, batch, out, seed=42):
     from datasets import load_dataset
 
     tok = AutoTokenizer.from_pretrained(MODEL)
+    # Real label names, not the LABEL_0/1 defaults: llama.cpp's converter only maps
+    # classifier.weight to the output head when id2label names real labels (export_gguf.py).
     model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL, num_labels=2, attn_implementation="sdpa")
+        MODEL, num_labels=2, attn_implementation="sdpa",
+        id2label=LABELS, label2id={v: k for k, v in LABELS.items()})
 
     ds = load_dataset("json", data_files={
         "train": str(SPLITS / "train.jsonl"),
         "validation": str(SPLITS / "val.jsonl")})
 
     def prep(b):
-        enc = tok(b["text"], truncation=True, max_length=128)
+        enc = tok(b["text"], truncation=True, max_length=MAX_LEN)
         enc["labels"] = [int(x) for x in b["label"]]
         return enc
 
@@ -83,7 +89,7 @@ def main(lr, epochs, batch, out):
         metric_for_best_model="f1", greater_is_better=True,
         load_best_model_at_end=True, weight_decay=1e-5,
         fp16=torch.cuda.is_available(), report_to="none",
-        logging_steps=20, save_total_limit=2)
+        logging_steps=20, save_total_limit=2, seed=seed)
 
     trainer = WeightedTrainer(
         model=model, args=args,
@@ -97,6 +103,7 @@ def main(lr, epochs, batch, out):
     print("best val:", trainer.evaluate())
     trainer.save_model(out)
     tok.save_pretrained(out)
+    model_meta.write(out, AXIS, UNIT, MAX_LEN)   # consumers score at the trained unit/length
     print("saved ->", out)
 
 
@@ -129,8 +136,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--lr", type=float, default=3e-5)
     ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--batch", type=int, default=32)
+    # 512-token paragraphs need a smaller batch to fit a 24GB card at 400m
+    ap.add_argument("--batch", type=int, default=16 if UNIT == "paragraph" else 32)
     ap.add_argument("--out", default=str(CLASSIFIER))
+    ap.add_argument("--seed", type=int, default=42, help="HF Trainer seed (42 = every earlier run)")
     ap.add_argument("--demo", action="store_true")
     a = ap.parse_args()
-    demo() if a.demo else main(a.lr, a.epochs, a.batch, a.out)
+    demo() if a.demo else main(a.lr, a.epochs, a.batch, a.out, a.seed)

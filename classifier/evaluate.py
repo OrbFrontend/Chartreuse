@@ -18,6 +18,7 @@ from sklearn.metrics import (average_precision_score, confusion_matrix,
                              precision_recall_curve,
                              precision_recall_fscore_support)
 
+from core import model_meta
 from core.paths import SPLITS, CLASSIFIER
 
 MODEL = str(CLASSIFIER)
@@ -34,11 +35,12 @@ def predict_probs(model_dir, texts, batch=64):
     tok = AutoTokenizer.from_pretrained(model_dir)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForSequenceClassification.from_pretrained(model_dir).to(dev).eval()
+    max_length = model_meta.read(model_dir)["max_length"]
     out = []
     with torch.no_grad():
         for i in range(0, len(texts), batch):
             enc = tok(texts[i:i + batch], return_tensors="pt", padding=True,
-                      truncation=True, max_length=128).to(dev)
+                      truncation=True, max_length=max_length).to(dev)
             out.append(model(**enc).logits.softmax(-1)[:, 1].cpu().numpy())
     return np.concatenate(out)
 
@@ -92,7 +94,24 @@ def main(model_dir, split):
     print(f"threshold source: {src or 'default 0.5 (run calibrate.py first)'}\n")
     probs = predict_probs(model_dir, [r["text"] for r in rows])
     _, _, _, preds = report(y_true, probs, threshold)
+    by_slice(rows, y_true, preds, probs)
     show_errors(rows, y_true, preds, probs)
+
+
+def by_slice(rows, y_true, preds, probs):
+    """Per-slice breakdown when the split mixes kinds of row (a paragraph test set holds Haiku
+    replies, synthetic variants and one-sentence rows). Slice = `variant` if present, else `source`."""
+    keys = [r.get("variant") or r.get("source", "?") for r in rows]
+    if len(set(keys)) < 2:
+        return
+    print("\nby slice (n, positives, flagged, precision, recall at the threshold):")
+    for k in sorted(set(keys)):
+        idx = np.array([i for i, x in enumerate(keys) if x == k])
+        y, p = y_true[idx], preds[idx]
+        tp, fp = int(((p == 1) & (y == 1)).sum()), int(((p == 1) & (y == 0)).sum())
+        prec = f"{tp / (tp + fp):.3f}" if tp + fp else "  -  "
+        rec = f"{tp / y.sum():.3f}" if y.sum() else "  -  "
+        print(f"  {k:<22} n={len(idx):<5} pos={int(y.sum()):<5} flagged={int(p.sum()):<5} P={prec}  R={rec}")
 
 
 def demo():

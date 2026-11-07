@@ -1,5 +1,5 @@
 """CPU/RAM-only purple-prose gate. Loads the int8 ONNX model (classifier/quantize.py)
-and scores one sentence per line. No torch, no GPU.
+and scores one text per line (a sentence, or a paragraph for a paragraph-unit model). No torch, no GPU.
 
   echo "The sun bled its dying gold across the weeping hills." | python -m classifier.predict
   python -m classifier.predict --text "The committee met on Tuesday."
@@ -14,6 +14,7 @@ import sys
 
 import numpy as np
 
+from core import model_meta
 from core.paths import CLASSIFIER, ONNX
 
 
@@ -30,15 +31,15 @@ def load_session(model_dir, threads=None):
             break
     sess = ort.InferenceSession(f, so, providers=["CPUExecutionProvider"])
     tok = AutoTokenizer.from_pretrained(model_dir)
-    return sess, tok, {i.name for i in sess.get_inputs()}
+    return sess, tok, {i.name for i in sess.get_inputs()}, model_meta.read(model_dir)["max_length"]
 
 
 def onnx_probs(session, texts, batch=64):
-    sess, tok, want = session
+    sess, tok, want, max_length = session
     out = []
     for i in range(0, len(texts), batch):
         enc = tok(texts[i:i + batch], return_tensors="np", padding=True,
-                  truncation=True, max_length=128)
+                  truncation=True, max_length=max_length)
         feed = {k: v for k, v in enc.items() if k in want}
         logits = sess.run(None, feed)[0]
         e = np.exp(logits - logits.max(-1, keepdims=True))
